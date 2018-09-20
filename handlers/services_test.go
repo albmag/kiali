@@ -11,11 +11,10 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/api/prometheus/v1"
-	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 
-	"github.com/kiali/kiali/kubernetes"
+	"github.com/kiali/kiali/config"
 	"github.com/kiali/kiali/kubernetes/kubetest"
 	"github.com/kiali/kiali/prometheus"
 	"github.com/kiali/kiali/prometheus/prometheustest"
@@ -36,14 +35,15 @@ func TestServiceMetricsDefault(t *testing.T) {
 		query := args[1].(string)
 		assert.IsType(t, v1.Range{}, args[2])
 		r := args[2].(v1.Range)
-		assert.Contains(t, query, "svc.ns.svc.cluster.local")
+		assert.Contains(t, query, "destination_service_name=\"svc\"")
+		assert.Contains(t, query, "destination_service_namespace=\"ns\"")
 		assert.Contains(t, query, "[1m]")
 		if strings.Contains(query, "histogram_quantile") {
 			// Histogram specific queries
-			assert.Contains(t, query, " by (le)")
+			assert.Contains(t, query, " by (le,reporter)")
 			atomic.AddUint32(&histogramSentinel, 1)
 		} else {
-			assert.NotContains(t, query, " by ")
+			assert.Contains(t, query, " by (reporter)")
 			atomic.AddUint32(&gaugeSentinel, 1)
 		}
 		assert.Equal(t, 15*time.Second, r.Step)
@@ -92,15 +92,17 @@ func TestServiceMetricsWithParams(t *testing.T) {
 		query := args[1].(string)
 		assert.IsType(t, v1.Range{}, args[2])
 		r := args[2].(v1.Range)
+		assert.Contains(t, query, "destination_service_name=\"svc\"")
+		assert.Contains(t, query, "destination_service_namespace=\"ns\"")
 		assert.Contains(t, query, "rate(")
 		assert.Contains(t, query, "[5h]")
 		if strings.Contains(query, "histogram_quantile") {
 			// Histogram specific queries
-			assert.Contains(t, query, " by (le,response_code)")
-			assert.Contains(t, query, "istio_request_size")
+			assert.Contains(t, query, " by (le,reporter,response_code)")
+			assert.Contains(t, query, "istio_request_bytes")
 			atomic.AddUint32(&histogramSentinel, 1)
 		} else {
-			assert.Contains(t, query, " by (response_code)")
+			assert.Contains(t, query, " by (reporter,response_code)")
 			atomic.AddUint32(&gaugeSentinel, 1)
 		}
 		assert.Equal(t, 2*time.Second, r.Step)
@@ -243,62 +245,26 @@ func TestServiceMetricsBadRateFunc(t *testing.T) {
 }
 
 func setupServiceMetricsEndpoint(t *testing.T) (*httptest.Server, *prometheustest.PromAPIMock) {
-	client, api, err := setupMocked()
+	config.Set(config.NewConfig())
+	k8s := kubetest.NewK8SClientMock()
+
+	api := new(prometheustest.PromAPIMock)
+	prom, err := prometheus.NewClient()
 	if err != nil {
 		t.Fatal(err)
 	}
+	prom.Inject(api)
 
 	mr := mux.NewRouter()
 	mr.HandleFunc("/api/namespaces/{namespace}/services/{service}/metrics", http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			getServiceMetrics(w, r, func() (*prometheus.Client, error) {
-				return client, nil
+				return prom, nil
 			})
 		}))
 
 	ts := httptest.NewServer(mr)
-	return ts, api
-}
-
-// TestServiceHealth is unit test (testing request handling, not the prometheus client behaviour)
-func TestServiceHealth(t *testing.T) {
-	ts, k8s, prom := setupServiceHealthEndpoint(t)
-	defer ts.Close()
-
-	url := ts.URL + "/api/namespaces/ns/services/svc/health"
-
-	k8s.On("GetServiceDetails", mock.AnythingOfType("string"), mock.AnythingOfType("string")).Run(func(args mock.Arguments) {
-		assert.Equal(t, "ns", args[0])
-		assert.Equal(t, "svc", args[1])
-	}).Return((*kubernetes.ServiceDetails)(nil), nil)
-
-	prom.On("GetServiceHealth", mock.AnythingOfType("string"), mock.AnythingOfType("string"), mock.AnythingOfType("[]int32")).Run(func(args mock.Arguments) {
-		assert.Equal(t, "ns", args[0])
-		assert.Equal(t, "svc", args[1])
-	}).Return(prometheus.EnvoyHealth{}, nil)
-
-	prom.On("GetServiceRequestRates", mock.AnythingOfType("string"), mock.AnythingOfType("string"), mock.AnythingOfType("string")).Return(model.Vector{}, model.Vector{}, nil)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	actual, _ := ioutil.ReadAll(resp.Body)
-
-	assert.NotEmpty(t, actual)
-	assert.Equal(t, 200, resp.StatusCode, string(actual))
-	k8s.AssertNumberOfCalls(t, "GetServiceDetails", 1)
-	prom.AssertNumberOfCalls(t, "GetServiceHealth", 1)
-}
-
-func setupServiceHealthEndpoint(t *testing.T) (*httptest.Server, *kubetest.K8SClientMock, *prometheustest.PromClientMock) {
-	k8s := new(kubetest.K8SClientMock)
-	prom := new(prometheustest.PromClientMock)
 	business.SetWithBackends(k8s, prom)
-
-	mr := mux.NewRouter()
-	mr.HandleFunc("/api/namespaces/{namespace}/services/{service}/health", ServiceHealth)
-
-	ts := httptest.NewServer(mr)
-	return ts, k8s, prom
+	return ts, api
+	// return nil, ts, api
 }

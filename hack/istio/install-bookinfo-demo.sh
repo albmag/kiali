@@ -16,6 +16,8 @@
 # CLIENT_EXE_NAME is going to either be "oc", "kubectl", or "istiooc" (which is the default since it will be installed via cluster-openshift.sh hack script).
 ISTIO_DIR=
 CLIENT_EXE_NAME="istiooc"
+NAMESPACE="bookinfo"
+RATE=1
 
 # process command line args
 while [[ $# -gt 0 ]]; do
@@ -29,11 +31,41 @@ while [[ $# -gt 0 ]]; do
       CLIENT_EXE_NAME="$2"
       shift;shift
       ;;
+    -n|--namespace)
+      NAMESPACE="$2"
+      shift;shift
+      ;;
+    -b|--bookinfo.yaml)
+      BOOKINFO_YAML="$2"
+      shift;shift
+      ;;
+    -g|--gateway.yaml)
+      GATEWAY_YAML="$2"
+      shift;shift
+      ;;
+    --mongo)
+      MONGO_ENABLED="true"
+      shift;
+      ;;
+    --mysql)
+      MYSQL_ENABLED="true"
+      shift;
+      ;;
+    -tg|--traffic-generator)
+      TRAFFIC_GENERATOR_ENABLED="true"
+      shift;
+      ;;
     -h|--help)
       cat <<HELPMSG
 Valid command line arguments:
   -id|--istio-dir <dir>: Where Istio has already been downloaded. If not found, this script aborts.
   -c|--client-exe <name>: Cluster client executable name - valid values are "kubectl" or "oc" or "istiooc"
+  -n|--namespace <name>: Install the demo in this namespace (default: bookinfo)
+  -b|--bookinfo.yaml <file>: A custom yaml file to deploy the bookinfo demo
+  -g|--gateway.yaml <file>: A custom yaml file to deploy the bookinfo-gateway resources
+  --mongo: Install a Mongo DB that a ratings service will access
+  --mysql: Install a MySQL DB that a ratings service will access
+  -tg|--traffic-generator: Install Kiali Traffic Generator on Bookinfo
   -h|--help : this message
 HELPMSG
       exit 1
@@ -86,25 +118,60 @@ fi
 
 # If OpenShift, we need to do some additional things
 if [[ "$CLIENT_EXE" = *"oc" ]]; then
-  $CLIENT_EXE new-project bookinfo
-  $CLIENT_EXE adm policy add-scc-to-user anyuid -z default -n bookinfo
-  $CLIENT_EXE adm policy add-scc-to-user privileged -z default -n bookinfo
+  $CLIENT_EXE new-project ${NAMESPACE}
+  $CLIENT_EXE adm policy add-scc-to-user anyuid -z default -n ${NAMESPACE}
+  $CLIENT_EXE adm policy add-scc-to-user privileged -z default -n ${NAMESPACE}
 else
-  $CLIENT_EXE create namespace bookinfo
+  $CLIENT_EXE create namespace ${NAMESPACE}
 fi
 
-$ISTIOCTL kube-inject -f ${ISTIO_DIR}/samples/bookinfo/kube/bookinfo.yaml | $CLIENT_EXE apply -n bookinfo -f -
+if [ "${BOOKINFO_YAML}" == "" ]; then
+  BOOKINFO_YAML="${ISTIO_DIR}/samples/bookinfo/platform/kube/bookinfo.yaml"
+fi
+
+if [ "${GATEWAY_YAML}" == "" ]; then
+  GATEWAY_YAML="${ISTIO_DIR}/samples/bookinfo/networking/bookinfo-gateway.yaml"
+fi
+
+$ISTIOCTL kube-inject -f ${BOOKINFO_YAML} | $CLIENT_EXE apply -n ${NAMESPACE} -f -
 # This is only if automatic injection of sidecars is enabled
-# $CLIENT_EXE apply -n bookinfo -f ${ISTIO_DIR}/samples/bookinfo/kube/bookinfo.yaml
-$ISTIOCTL create -n bookinfo -f ${ISTIO_DIR}/samples/bookinfo/routing/bookinfo-gateway.yaml
+# $CLIENT_EXE apply -n ${NAMESPACE} -f ${BOOKINFO_YAML}
+
+$ISTIOCTL create -n ${NAMESPACE} -f ${GATEWAY_YAML}
+
+if [ "${MONGO_ENABLED}" == "true" ]; then
+  echo "Installing Mongo DB and a ratings service that uses it"
+  MONGO_DB_YAML="${ISTIO_DIR}/samples/bookinfo/platform/kube/bookinfo-db.yaml"
+  MONGO_SERVICE_YAML="${ISTIO_DIR}/samples/bookinfo/platform/kube/bookinfo-ratings-v2.yaml"
+  $ISTIOCTL kube-inject -f ${MONGO_DB_YAML} | $CLIENT_EXE apply -n ${NAMESPACE} -f -
+  $ISTIOCTL kube-inject -f ${MONGO_SERVICE_YAML} | $CLIENT_EXE apply -n ${NAMESPACE} -f -
+fi
+
+if [ "${MYSQL_ENABLED}" == "true" ]; then
+  echo "Installing MySql DB and a ratings service that uses it"
+  MYSQL_DB_YAML="${ISTIO_DIR}/samples/bookinfo/platform/kube/bookinfo-mysql.yaml"
+  MYSQL_SERVICE_YAML="${ISTIO_DIR}/samples/bookinfo/platform/kube/bookinfo-ratings-v2-mysql.yaml"
+  $ISTIOCTL kube-inject -f ${MYSQL_DB_YAML} | $CLIENT_EXE apply -n ${NAMESPACE} -f -
+  $ISTIOCTL kube-inject -f ${MYSQL_SERVICE_YAML} | $CLIENT_EXE apply -n ${NAMESPACE} -f -
+fi
 
 sleep 4
 
 echo "Bookinfo Demo should be installed and starting up - here are the pods and services"
-$CLIENT_EXE get services -n bookinfo
-$CLIENT_EXE get pods -n bookinfo
+$CLIENT_EXE get services -n ${NAMESPACE}
+$CLIENT_EXE get pods -n ${NAMESPACE}
 
 # If OpenShift, we need to do some additional things
 if [[ "$CLIENT_EXE" = *"oc" ]]; then
-  $CLIENT_EXE expose svc productpage
+  $CLIENT_EXE expose svc productpage -n ${NAMESPACE}
+  $CLIENT_EXE expose svc istio-ingressgateway -n istio-system
+fi
+
+if [ "${TRAFFIC_GENERATOR_ENABLED}" == "true" ]; then
+  echo "Installing Traffic Generator"
+  INGRESS_ROUTE=$(${CLIENT_EXE} get route istio-ingressgateway -o jsonpath='{.spec.host}{"\n"}' -n istio-system)
+  curl https://raw.githubusercontent.com/kiali/kiali-test-mesh/master/traffic-generator/openshift/traffic-generator-configmap.yaml | DURATION='0s' ROUTE="http://${INGRESS_ROUTE}/productpage" RATE="${RATE}"  envsubst | oc apply -n ${NAMESPACE} -f -
+  curl https://raw.githubusercontent.com/kiali/kiali-test-mesh/master/traffic-generator/openshift/traffic-generator.yaml | oc apply -n ${NAMESPACE} -f -
+
+
 fi

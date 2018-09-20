@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
-
-	"github.com/kiali/kiali/log"
 )
 
 // Structured version of Claims Section, as referenced at
@@ -16,19 +14,6 @@ import (
 type TokenClaim struct {
 	User string `json:"username"`
 	jwt.StandardClaims
-}
-
-// HTTP status code 200 and tokenGenerated model in data
-// swagger:response tokenGenerated
-type swaggTokenGeneratedResp struct {
-	// in:body
-	Body struct {
-		// HTTP status code
-		// default: 200
-		Code int `json:"code"`
-		// StatusInfo model
-		Data TokenGenerated `json:"data"`
-	}
 }
 
 // TokenGenerated tokenGenerated
@@ -51,11 +36,9 @@ type TokenGenerated struct {
 	ExpiredAt string `json:"expired_at"`
 }
 
-/*
-Generate the token with a Expiraton of <ExpiresAt> seconds
-*/
+// GenerateToken generates a signed token with an expiration of <ExpirationSeconds> seconds
 func GenerateToken(username string) (TokenGenerated, error) {
-	timeExpire := time.Now().Add(time.Second * time.Duration(Get().Token.ExpirationAt))
+	timeExpire := time.Now().Add(time.Second * time.Duration(Get().LoginToken.ExpirationSeconds))
 	claim := TokenClaim{
 		username,
 		jwt.StandardClaims{
@@ -64,7 +47,7 @@ func GenerateToken(username string) (TokenGenerated, error) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claim)
-	ss, err := token.SignedString(Get().Token.Secret)
+	ss, err := token.SignedString(Get().LoginToken.SigningKey)
 	if err != nil {
 		return TokenGenerated{}, err
 	}
@@ -72,33 +55,19 @@ func GenerateToken(username string) (TokenGenerated, error) {
 	return TokenGenerated{Token: ss, ExpiredAt: timeExpire.String()}, nil
 }
 
+// ValidateToken checks if the input token is still valid
 func ValidateToken(tokenString string) error {
 	token, err := jwt.ParseWithClaims(tokenString, &jwt.StandardClaims{}, func(token *jwt.Token) (interface{}, error) {
-		return Get().Token.Secret, nil
+		return Get().LoginToken.SigningKey, nil
 	})
 	if err != nil {
 		return err
 	}
 	if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-		return errors.New(fmt.Sprintf("Unexpected signing method: %s", token.Header["alg"]))
+		return fmt.Errorf("Unexpected signing method: %s", token.Header["alg"])
 	}
 	if token.Valid {
 		return nil
-	} else if ve, ok := err.(*jwt.ValidationError); ok {
-		if ve.Errors&jwt.ValidationErrorMalformed != 0 {
-			log.Debugf("That's not even a token")
-			return errors.New("That's not even a token")
-		} else if ve.Errors&(jwt.ValidationErrorExpired|jwt.ValidationErrorNotValidYet) != 0 {
-			// Token is either expired or not active yet
-			log.Debugf("Token expired ... Timing is everything")
-			return errors.New("Token expired ... Timing is everything")
-		} else {
-			log.Debugf("Couldn't handle this token:", err)
-			return err
-		}
-	} else {
-		log.Debugf("Couldn't handle this token:", err)
-		return err
 	}
-	return nil
+	return errors.New("Invalid token")
 }

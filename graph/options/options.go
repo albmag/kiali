@@ -1,8 +1,9 @@
-// Package options holds the currently supported path variables and query params
-// for the graph handlers. See graph package for details.
+// Options package holds the option settings for a single graph generation.
 package options
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -11,104 +12,146 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"github.com/kiali/kiali/graph"
 	"github.com/kiali/kiali/graph/appender"
-	"github.com/kiali/kiali/services/models"
+	"github.com/kiali/kiali/services/business"
 )
 
 const (
-	AppenderAll          string = "_all_"
-	NamespaceAll         string = "all"
-	NamespaceIstioSystem string = "istio-system"
+	AppenderAll               string = "_all_"
+	GroupByVersion            string = "version"
+	NamespaceAll              string = "all"
+	NamespaceIstioSystem      string = "istio-system"
+	defaultDuration           string = "10m"
+	defaultGraphType          string = graph.GraphTypeApp
+	defaultGroupBy            string = GroupByVersion
+	defaultIncludeIstio       bool   = false
+	defaultInjectServiceNodes bool   = false
+	defaultVendor             string = "cytoscape"
 )
+
+// NodeOptions are those that apply only to node-detail graphs
+type NodeOptions struct {
+	App      string
+	Service  string
+	Version  string
+	Workload string
+}
 
 // VendorOptions are those that are supplied to the vendor-specific generators.
 type VendorOptions struct {
-	GroupByVersion bool
-	Timestamp      int64
+	GraphType string
+	GroupBy   string
+	Timestamp int64
 }
 
 // Options are all supported graph generation options.
 type Options struct {
-	Appenders    []appender.Appender
-	Duration     time.Duration
-	IncludeIstio bool // include istio-system services. Ignored for istio-system ns. Default false.
-	Metric       string
-	Namespaces   []string
-	QueryTime    int64 // unix time in seconds
-	Service      string
-	Vendor       string
+	AccessibleNamespaces map[string]bool
+	Appenders            []appender.Appender
+	Duration             time.Duration
+	IncludeIstio         bool // include istio-system services. Ignored for istio-system ns. Default false.
+	InjectServiceNodes   bool // inject destination service nodes between source and destination nodes.
+	Namespaces           []string
+	NodeOptions
+	QueryTime int64 // unix time in seconds
+	Workload  string
+	Vendor    string
+	Version   string
 	VendorOptions
 }
 
 func NewOptions(r *http.Request) Options {
 	// path variables
 	vars := mux.Vars(r)
+	app := vars["app"]
+	version := vars["version"]
 	namespace := vars["namespace"]
 	service := vars["service"]
+	workload := vars["workload"]
 
 	// query params
 	params := r.URL.Query()
 	duration, durationErr := time.ParseDuration(params.Get("duration"))
 	includeIstio, includeIstioErr := strconv.ParseBool(params.Get("includeIstio"))
-	groupByVersion, groupByVersionErr := strconv.ParseBool(params.Get("groupByVersion"))
-	metric := params.Get("metric")
+	injectServiceNodes, injectServiceNodesErr := strconv.ParseBool(params.Get("injectServiceNodes"))
+	graphType := params.Get("graphType")
+	groupBy := params.Get("groupBy")
 	queryTime, queryTimeErr := strconv.ParseInt(params.Get("queryTime"), 10, 64)
 	namespaces := params.Get("namespaces") // csl of namespaces. Overrides namespace path param if set
 	vendor := params.Get("vendor")
 
+	accessibleNamespaces := getAccessibleNamespaces()
+
 	var namespaceNames []string
 	fetchNamespaces := namespaces == NamespaceAll || (namespaces == "" && (namespace == NamespaceAll))
 	if fetchNamespaces {
-		namespaces, err := models.GetNamespaces()
-		checkError(err)
-
-		for _, namespace := range namespaces {
+		for namespace, _ := range accessibleNamespaces {
 			// The istio-system namespace is only shown when explicitly requested. Note that the
 			// 'includeIstio' option doesn't apply here, that option affects what is done in
 			// non-istio-system namespaces.
-			if namespace.Name != NamespaceIstioSystem {
-				namespaceNames = append(namespaceNames, namespace.Name)
+			if namespace != NamespaceIstioSystem {
+				namespaceNames = append(namespaceNames, namespace)
 			}
 		}
 	} else if namespaces != "" {
 		namespaceNames = strings.Split(namespaces, ",")
+		for _, namespaceName := range namespaceNames {
+			if _, found := accessibleNamespaces[namespaceName]; !found {
+				checkError(errors.New(fmt.Sprintf("Requested namespace [%s] is not accessible.", namespaceName)))
+			}
+		}
 	} else if namespace != "" {
-		namespaceNames = []string{namespace}
+		if _, found := accessibleNamespaces[namespace]; !found {
+			checkError(errors.New(fmt.Sprintf("Requested namespace [%s] is not accessible.", namespace)))
+		} else {
+			namespaceNames = []string{namespace}
+		}
 	} else {
 		// note, some global handlers do not require any namespaces
 		namespaceNames = []string{}
 	}
 
 	if durationErr != nil {
-		duration, _ = time.ParseDuration("10m")
+		duration, _ = time.ParseDuration(defaultDuration)
 	}
 	if includeIstioErr != nil {
-		includeIstio = false
+		includeIstio = defaultIncludeIstio
 	}
-	if groupByVersionErr != nil {
-		groupByVersion = true
+	if injectServiceNodesErr != nil {
+		injectServiceNodes = defaultInjectServiceNodes
 	}
-	if "" == metric {
-		metric = "istio_request_count"
+	if "" == graphType {
+		graphType = defaultGraphType
+	}
+	if "" == groupBy {
+		groupBy = defaultGroupBy
 	}
 	if queryTimeErr != nil {
 		queryTime = time.Now().Unix()
 	}
 	if "" == vendor {
-		vendor = "cytoscape"
+		vendor = defaultVendor
 	}
 
 	options := Options{
-		Duration:     duration,
-		IncludeIstio: includeIstio,
-		Metric:       metric,
-		Namespaces:   namespaceNames,
-		QueryTime:    queryTime,
-		Service:      service,
-		Vendor:       vendor,
+		AccessibleNamespaces: accessibleNamespaces,
+		Duration:             duration,
+		IncludeIstio:         includeIstio,
+		InjectServiceNodes:   injectServiceNodes,
+		Namespaces:           namespaceNames,
+		QueryTime:            queryTime,
+		Vendor:               vendor,
+		NodeOptions: NodeOptions{
+			App:      app,
+			Service:  service,
+			Version:  version,
+			Workload: workload,
+		},
 		VendorOptions: VendorOptions{
-			GroupByVersion: groupByVersion,
-			Timestamp:      queryTime,
+			GraphType: graphType,
+			GroupBy:   groupBy,
+			Timestamp: queryTime,
 		},
 	}
 
@@ -128,11 +171,11 @@ func parseAppenders(params url.Values, o Options) []appender.Appender {
 
 	// The appender order is important
 	// To reduce processing, filter dead services first
-	// To reduce processing, next run appenders that don't apply to orphan services
+	// To reduce processing, next run appenders that don't apply to unused services
 	// Add orphan (unused) services
 	// Run remaining appenders
-	if csl == AppenderAll || strings.Contains(csl, "dead_service") {
-		appenders = append(appenders, appender.DeadServiceAppender{})
+	if csl == AppenderAll || strings.Contains(csl, "dead_node") {
+		appenders = append(appenders, appender.DeadNodeAppender{})
 	}
 	if csl == AppenderAll || strings.Contains(csl, "response_time") {
 		quantile := appender.DefaultQuantile
@@ -142,26 +185,57 @@ func parseAppenders(params url.Values, o Options) []appender.Appender {
 			}
 		}
 		a := appender.ResponseTimeAppender{
-			Duration:  o.Duration,
-			Quantile:  quantile,
-			QueryTime: o.QueryTime,
+			Duration:     o.Duration,
+			Quantile:     quantile,
+			GraphType:    o.GraphType,
+			IncludeIstio: o.IncludeIstio,
+			QueryTime:    o.QueryTime,
 		}
 		appenders = append(appenders, a)
 	}
-	if csl == AppenderAll || strings.Contains(csl, "unused_service") {
-		appenders = append(appenders, appender.UnusedServiceAppender{})
+	if csl == AppenderAll || strings.Contains(csl, "security_policy") {
+		a := appender.SecurityPolicyAppender{
+			Duration:     o.Duration,
+			GraphType:    o.GraphType,
+			IncludeIstio: o.IncludeIstio,
+			QueryTime:    o.QueryTime,
+		}
+		appenders = append(appenders, a)
+	}
+	if csl == AppenderAll || strings.Contains(csl, "unused_node") {
+		appenders = append(appenders, appender.UnusedNodeAppender{
+			GraphType: o.GraphType,
+		})
 	}
 	if csl == AppenderAll || strings.Contains(csl, "istio") {
 		appenders = append(appenders, appender.IstioAppender{})
 	}
 	if csl == AppenderAll || strings.Contains(csl, "sidecars_check") {
-		appenders = append(appenders, appender.SidecarsCheckAppender{})
-	}
-	if csl == AppenderAll || strings.Contains(csl, "health") {
-		appenders = append(appenders, appender.HealthAppender{})
+		appenders = append(appenders, appender.SidecarsCheckAppender{
+			AccessibleNamespaces: o.AccessibleNamespaces,
+		})
 	}
 
 	return appenders
+}
+
+// getAccessibleNamespaces returns a Set of all namespaces accessible to the user.
+// The Set is implemented using the map[string]bool convention.
+func getAccessibleNamespaces() map[string]bool {
+	// Get the namespaces
+	business, err := business.Get()
+	checkError(err)
+
+	namespaces, err := business.Namespace.GetNamespaces()
+	checkError(err)
+
+	// Create a map to store the namespaces
+	namespaceMap := make(map[string]bool)
+	for _, namespace := range namespaces {
+		namespaceMap[namespace.Name] = true
+	}
+
+	return namespaceMap
 }
 
 func checkError(err error) {

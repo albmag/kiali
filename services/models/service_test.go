@@ -5,31 +5,36 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"k8s.io/api/apps/v1beta1"
-	autoscalingV1 "k8s.io/api/autoscaling/v1"
 	"k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/kiali/kiali/config"
 	"github.com/kiali/kiali/kubernetes"
+	"github.com/kiali/kiali/prometheus"
 )
 
 func TestServiceDetailParsing(t *testing.T) {
 	assert := assert.New(t)
+	config.Set(config.NewConfig())
 
-	service := Service{}
-	service.Name = "service"
-	service.Namespace = Namespace{"namespace"}
-	service.SetServiceDetails(fakeServiceDetails(), fakeIstioDetails(), fakePrometheusDetails())
+	service := ServiceDetails{}
+	service.SetService(fakeService())
+	service.SetEndpoints(fakeEndpoints())
+	service.SetPods(fakePods())
+	service.SetVirtualServices(fakeVirtualService())
+	service.SetDestinationRules(fakeDestinationRules())
+	service.SetSourceWorkloads(fakeSourceWorkloads())
 
 	// Kubernetes Details
-	assert.Equal(service.Name, "service")
-	assert.Equal(service.Namespace.Name, "namespace")
-	assert.Equal(service.CreatedAt, "2018-03-08T17:44:00+03:00")
-	assert.Equal(service.ResourceVersion, "1234")
-	assert.Equal(service.Type, "ClusterIP")
-	assert.Equal(service.Ip, "fromservice")
-	assert.Equal(service.Labels, map[string]string{"label1": "labelName1", "label2": "labelName2"})
-	assert.Equal(service.Ports, Ports{
+
+	assert.Equal(service.Service.Name, "Name")
+	assert.Equal(service.Service.Namespace.Name, "Namespace")
+	assert.Equal(service.Service.CreatedAt, "2018-03-08T17:44:00+03:00")
+	assert.Equal(service.Service.ResourceVersion, "1234")
+	assert.Equal(service.Service.Type, "ClusterIP")
+	assert.Equal(service.Service.Ip, "127.0.0.9")
+	assert.Equal(service.Service.Labels, map[string]string{"label1": "labelName1", "label2": "labelName2"})
+	assert.Equal(service.Service.Ports, Ports{
 		Port{Name: "http", Protocol: "TCP", Port: 3001},
 		Port{Name: "http", Protocol: "TCP", Port: 3000}})
 	assert.Equal(service.Endpoints, Endpoints{
@@ -42,51 +47,6 @@ func TestServiceDetailParsing(t *testing.T) {
 				Port{Name: "http", Protocol: "TCP", Port: 3001},
 				Port{Name: "http", Protocol: "TCP", Port: 3000},
 			}}})
-
-	assert.Len(service.Pods, 2)
-	assert.Equal(service.Pods[0].Name, "reviews-v1-1234")
-	assert.Equal(service.Pods[1].Name, "reviews-v2-1234")
-	assert.Equal(*service.Deployments[0], Deployment{
-		Name:                "reviews-v1",
-		Labels:              map[string]string{"apps": "reviews", "version": "v1"},
-		CreatedAt:           "2018-03-08T17:44:00+03:00",
-		ResourceVersion:     "1234",
-		Replicas:            3,
-		AvailableReplicas:   1,
-		UnavailableReplicas: 2,
-		Autoscaler: Autoscaler{
-			Name:                            "reviews-v1",
-			Labels:                          map[string]string{"apps": "reviews", "version": "v1"},
-			CreatedAt:                       "2018-03-08T17:44:00+03:00",
-			MinReplicas:                     1,
-			MaxReplicas:                     10,
-			TargetCPUUtilizationPercentage:  50,
-			CurrentReplicas:                 3,
-			DesiredReplicas:                 4,
-			ObservedGeneration:              50,
-			CurrentCPUUtilizationPercentage: 70}})
-
-	assert.Equal(*service.Deployments[1], Deployment{
-		Name:                "reviews-v2",
-		Labels:              map[string]string{"apps": "reviews", "version": "v2"},
-		CreatedAt:           "2018-03-08T17:45:00+03:00",
-		ResourceVersion:     "1234",
-		Replicas:            3,
-		AvailableReplicas:   3,
-		UnavailableReplicas: 0,
-		Autoscaler: Autoscaler{
-			Name:                            "reviews-v2",
-			Labels:                          map[string]string{"apps": "reviews", "version": "v2"},
-			CreatedAt:                       "2018-03-08T17:45:00+03:00",
-			MinReplicas:                     1,
-			MaxReplicas:                     10,
-			TargetCPUUtilizationPercentage:  50,
-			CurrentReplicas:                 3,
-			DesiredReplicas:                 2,
-			ObservedGeneration:              50,
-			CurrentCPUUtilizationPercentage: 30}})
-
-	// Istio Details
 
 	assert.Equal(service.VirtualServices, VirtualServices{
 		VirtualService{
@@ -211,17 +171,40 @@ func TestServiceDetailParsing(t *testing.T) {
 		},
 	})
 
-	// Prometheus Client
-	assert.Equal(service.Dependencies, map[string][]string{
-		"v1": {"unknown", "/products", "/reviews"},
-		"v2": {"/catalog", "/shares"}})
+	assert.Equal(service.Dependencies, map[string][]SourceWorkload{
+		"v1": {SourceWorkload{Name: "unknown", Namespace: "ns"}, SourceWorkload{Name: "products-v1", Namespace: "ns"}, SourceWorkload{Name: "reviews-v2", Namespace: "ns"}},
+		"v2": {SourceWorkload{Name: "catalog-v1", Namespace: "ns"}, SourceWorkload{Name: "shares-v2", Namespace: "ns"}},
+	})
 }
 
-func fakeServiceDetails() *kubernetes.ServiceDetails {
-	t1, _ := time.Parse(time.RFC822Z, "08 Mar 18 17:44 +0300")
-	t2, _ := time.Parse(time.RFC822Z, "08 Mar 18 17:45 +0300")
+func TestServiceParse(t *testing.T) {
+	assert := assert.New(t)
+	config.Set(config.NewConfig())
 
-	service := &v1.Service{
+	service := Service{}
+	service.Name = "service"
+	service.Namespace = Namespace{"namespace"}
+
+	service.Parse(fakeService())
+	assert.Equal("labelName1", service.Labels["label1"])
+	assert.Equal("labelName2", service.Labels["label2"])
+	assert.Equal("ClusterIP", service.Type)
+	assert.Equal("127.0.0.9", service.Ip)
+	assert.Equal("1234", service.ResourceVersion)
+
+	assert.Equal("http", service.Ports[0].Name)
+	assert.Equal("TCP", service.Ports[0].Protocol)
+	assert.Equal(int32(3001), service.Ports[0].Port)
+
+	assert.Equal("http", service.Ports[1].Name)
+	assert.Equal("TCP", service.Ports[1].Protocol)
+	assert.Equal(int32(3000), service.Ports[1].Port)
+}
+
+func fakeService() *v1.Service {
+	t1, _ := time.Parse(time.RFC822Z, "08 Mar 18 17:44 +0300")
+
+	return &v1.Service{
 		ObjectMeta: meta_v1.ObjectMeta{
 			Name:              "Name",
 			Namespace:         "Namespace",
@@ -231,7 +214,7 @@ func fakeServiceDetails() *kubernetes.ServiceDetails {
 				"label1": "labelName1",
 				"label2": "labelName2"}},
 		Spec: v1.ServiceSpec{
-			ClusterIP: "fromservice",
+			ClusterIP: "127.0.0.9",
 			Type:      "ClusterIP",
 			Ports: []v1.ServicePort{
 				{
@@ -242,8 +225,10 @@ func fakeServiceDetails() *kubernetes.ServiceDetails {
 					Name:     "http",
 					Protocol: "TCP",
 					Port:     3000}}}}
+}
 
-	endpoints := &v1.Endpoints{
+func fakeEndpoints() *v1.Endpoints {
+	return &v1.Endpoints{
 		Subsets: []v1.EndpointSubset{
 			{
 				Addresses: []v1.EndpointAddress{
@@ -262,8 +247,13 @@ func fakeServiceDetails() *kubernetes.ServiceDetails {
 					{Name: "http", Protocol: "TCP", Port: 3001},
 					{Name: "http", Protocol: "TCP", Port: 3000},
 				}}}}
+}
 
-	pods := []v1.Pod{
+func fakePods() []v1.Pod {
+	t1, _ := time.Parse(time.RFC822Z, "08 Mar 18 17:44 +0300")
+	t2, _ := time.Parse(time.RFC822Z, "08 Mar 18 17:45 +0300")
+
+	return []v1.Pod{
 		v1.Pod{
 			ObjectMeta: meta_v1.ObjectMeta{
 				Name:              "reviews-v1-1234",
@@ -275,75 +265,9 @@ func fakeServiceDetails() *kubernetes.ServiceDetails {
 				CreationTimestamp: meta_v1.NewTime(t2),
 				Labels:            map[string]string{"apps": "reviews", "version": "v2"}}},
 	}
-
-	deployments := &v1beta1.DeploymentList{
-		Items: []v1beta1.Deployment{
-			v1beta1.Deployment{
-				ObjectMeta: meta_v1.ObjectMeta{
-					Name:              "reviews-v1",
-					CreationTimestamp: meta_v1.NewTime(t1),
-					ResourceVersion:   "1234",
-					Labels:            map[string]string{"apps": "reviews", "version": "v1"}},
-				Status: v1beta1.DeploymentStatus{
-					Replicas:            3,
-					AvailableReplicas:   1,
-					UnavailableReplicas: 2}},
-			v1beta1.Deployment{
-				ObjectMeta: meta_v1.ObjectMeta{
-					Name:              "reviews-v2",
-					CreationTimestamp: meta_v1.NewTime(t2),
-					ResourceVersion:   "1234",
-					Labels:            map[string]string{"apps": "reviews", "version": "v2"}},
-				Status: v1beta1.DeploymentStatus{
-					Replicas:            3,
-					AvailableReplicas:   3,
-					UnavailableReplicas: 0}}}}
-
-	autoscalers := &autoscalingV1.HorizontalPodAutoscalerList{
-		Items: []autoscalingV1.HorizontalPodAutoscaler{
-			autoscalingV1.HorizontalPodAutoscaler{
-				ObjectMeta: meta_v1.ObjectMeta{
-					Name:              "reviews-v1",
-					Labels:            map[string]string{"apps": "reviews", "version": "v1"},
-					CreationTimestamp: meta_v1.NewTime(t1)},
-				Spec: autoscalingV1.HorizontalPodAutoscalerSpec{
-					ScaleTargetRef: autoscalingV1.CrossVersionObjectReference{
-						Name: "reviews-v1"},
-					MinReplicas:                    &[]int32{1}[0],
-					MaxReplicas:                    10,
-					TargetCPUUtilizationPercentage: &[]int32{50}[0]},
-				Status: autoscalingV1.HorizontalPodAutoscalerStatus{
-					ObservedGeneration:              &[]int64{50}[0],
-					CurrentReplicas:                 3,
-					DesiredReplicas:                 4,
-					CurrentCPUUtilizationPercentage: &[]int32{70}[0]}},
-			autoscalingV1.HorizontalPodAutoscaler{
-				ObjectMeta: meta_v1.ObjectMeta{
-					Name:              "reviews-v2",
-					Labels:            map[string]string{"apps": "reviews", "version": "v2"},
-					CreationTimestamp: meta_v1.NewTime(t2)},
-				Spec: autoscalingV1.HorizontalPodAutoscalerSpec{
-					ScaleTargetRef: autoscalingV1.CrossVersionObjectReference{
-						Name: "reviews-v2"},
-					MinReplicas:                    &[]int32{1}[0],
-					MaxReplicas:                    10,
-					TargetCPUUtilizationPercentage: &[]int32{50}[0]},
-				Status: autoscalingV1.HorizontalPodAutoscalerStatus{
-					ObservedGeneration:              &[]int64{50}[0],
-					CurrentReplicas:                 3,
-					DesiredReplicas:                 2,
-					CurrentCPUUtilizationPercentage: &[]int32{30}[0]}}}}
-
-	return &kubernetes.ServiceDetails{
-		Service:     service,
-		Endpoints:   endpoints,
-		Pods:        pods,
-		Deployments: deployments,
-		Autoscalers: autoscalers,
-	}
 }
 
-func fakeIstioDetails() *kubernetes.IstioDetails {
+func fakeVirtualService() []kubernetes.IstioObject {
 	t2, _ := time.Parse(time.RFC822Z, "08 Mar 18 17:47 +0300")
 
 	virtualService1 := kubernetes.MockIstioObject{
@@ -427,7 +351,11 @@ func fakeIstioDetails() *kubernetes.IstioDetails {
 			},
 		},
 	}
-	virtualServices := []kubernetes.IstioObject{&virtualService1, &virtualService2}
+	return []kubernetes.IstioObject{&virtualService1, &virtualService2}
+}
+
+func fakeDestinationRules() []kubernetes.IstioObject {
+	t2, _ := time.Parse(time.RFC822Z, "08 Mar 18 17:47 +0300")
 
 	destinationRule1 := kubernetes.MockIstioObject{
 		ObjectMeta: meta_v1.ObjectMeta{
@@ -481,13 +409,15 @@ func fakeIstioDetails() *kubernetes.IstioDetails {
 			},
 		},
 	}
-	destinationRules := []kubernetes.IstioObject{&destinationRule1, &destinationRule2}
 
-	return &kubernetes.IstioDetails{virtualServices, destinationRules}
+	return []kubernetes.IstioObject{&destinationRule1, &destinationRule2}
 }
 
-func fakePrometheusDetails() map[string][]string {
-	return map[string][]string{
-		"v1": []string{"unknown", "/products", "/reviews"},
-		"v2": []string{"/catalog", "/shares"}}
+func fakeSourceWorkloads() map[string][]prometheus.Workload {
+	return map[string][]prometheus.Workload{
+		"v1": {{App: "unknown", Version: "unknown", Namespace: "ns", Workload: "unknown"},
+			{App: "products", Version: "v1", Namespace: "ns", Workload: "products-v1"},
+			{App: "reviews", Version: "v2", Namespace: "ns", Workload: "reviews-v2"}},
+		"v2": {{App: "catalog", Version: "v1", Namespace: "ns", Workload: "catalog-v1"},
+			{App: "shares", Version: "v2", Namespace: "ns", Workload: "shares-v2"}}}
 }

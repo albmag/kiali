@@ -394,11 +394,23 @@ type IstioObjectList interface {
 	GetItems() []IstioObject
 }
 
+// ServiceList holds list of services, pods and deployments
 type ServiceList struct {
 	Services    *v1.ServiceList
 	Pods        *v1.PodList
 	Deployments *v1beta1.DeploymentList
 }
+
+// AppDetails holds Services, Pods and Deployments having the same "app" label
+type AppDetails struct {
+	app         string
+	Services    []v1.Service
+	Pods        []v1.Pod
+	Deployments []v1beta1.Deployment
+}
+
+// NamespaceApps is a map of app_name x AppDetails
+type NamespaceApps = map[string]*AppDetails
 
 // ServiceDetails is a wrapper to group full Service description, Endpoints and Pods.
 // Used to fetch all details in a single operation instead to invoke individual APIs per each group.
@@ -410,11 +422,21 @@ type ServiceDetails struct {
 	Pods        []v1.Pod                                   `json:"pods"`
 }
 
+// DeploymentDetails is a wrapper to group full Deployment description, Services and Pods.
+// Used to fetch all details in a single operation instead to invoke individual APIs per each group.
+type DeploymentDetails struct {
+	Deployment *v1beta1.Deployment `json:"deployment"`
+	Pods       *v1.PodList         `json:"pods"`
+	Services   []v1.Service        `json:"services"`
+}
+
 // IstioDetails is a wrapper to group all Istio objects related to a Service.
 // Used to fetch all Istio information in a single operation instead to invoke individual APIs per each group.
 type IstioDetails struct {
 	VirtualServices  []IstioObject `json:"virtualservices"`
 	DestinationRules []IstioObject `json:"destinationrules"`
+	ServiceEntries   []IstioObject `json:"serviceentries"`
+	Gateways         []IstioObject `json:"gateways"`
 }
 
 // IstioRules is a wrapper to group all mixer rules related to a Namespace.

@@ -1,12 +1,25 @@
 package models
 
 import (
+	"k8s.io/api/core/v1"
+
 	"github.com/kiali/kiali/kubernetes"
+	"github.com/kiali/kiali/prometheus"
 )
 
 type ServiceOverview struct {
-	Name         string `json:"name"`
-	IstioSidecar bool   `json:"istioSidecar"`
+	// Name of the Service
+	// required: true
+	// example: reviews-v1
+	Name string `json:"name"`
+	// Define if Pods related to this Service has an IstioSidecar deployed
+	// required: true
+	// example: true
+	IstioSidecar bool `json:"istioSidecar"`
+	// Has label app
+	// required: true
+	// example: true
+	AppLabel bool `json:"appLabel"`
 }
 
 type ServiceList struct {
@@ -14,51 +27,91 @@ type ServiceList struct {
 	Services  []ServiceOverview `json:"services"`
 }
 
+type ServiceDetails struct {
+	Service          Service                     `json:"service"`
+	IstioSidecar     bool                        `json:"istioSidecar"`
+	Endpoints        Endpoints                   `json:"endpoints"`
+	VirtualServices  VirtualServices             `json:"virtualServices"`
+	DestinationRules DestinationRules            `json:"destinationRules"`
+	Dependencies     map[string][]SourceWorkload `json:"dependencies"`
+	Workloads        WorkloadOverviews           `json:"workloads"`
+	Health           ServiceHealth               `json:"health"`
+}
+
+type Services []*Service
 type Service struct {
-	Name             string              `json:"name"`
-	CreatedAt        string              `json:"createdAt"`
-	ResourceVersion  string              `json:"resourceVersion"`
-	Namespace        Namespace           `json:"namespace"`
-	Labels           map[string]string   `json:"labels"`
-	Type             string              `json:"type"`
-	Ip               string              `json:"ip"`
-	Ports            Ports               `json:"ports"`
-	Endpoints        Endpoints           `json:"endpoints"`
-	VirtualServices  VirtualServices     `json:"virtualServices"`
-	DestinationRules DestinationRules    `json:"destinationRules"`
-	Dependencies     map[string][]string `json:"dependencies"`
-	Pods             Pods                `json:"pods"`
-	Deployments      Deployments         `json:"deployments"`
-	Health           Health              `json:"health"`
+	Name            string            `json:"name"`
+	CreatedAt       string            `json:"createdAt"`
+	ResourceVersion string            `json:"resourceVersion"`
+	Namespace       Namespace         `json:"namespace"`
+	Labels          map[string]string `json:"labels"`
+	Type            string            `json:"type"`
+	Ip              string            `json:"ip"`
+	Ports           Ports             `json:"ports"`
 }
 
-func (s *Service) SetServiceDetails(serviceDetails *kubernetes.ServiceDetails, istioDetails *kubernetes.IstioDetails, prometheusDetails map[string][]string) {
-	s.setKubernetesDetails(serviceDetails)
-	s.setIstioDetails(istioDetails)
-	s.setPrometheusDetails(prometheusDetails)
+// SourceWorkload holds workload identifiers used for service dependencies
+type SourceWorkload struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
 }
 
-func (s *Service) setKubernetesDetails(serviceDetails *kubernetes.ServiceDetails) {
-	if serviceDetails.Service != nil {
-		s.Labels = serviceDetails.Service.Labels
-		s.Type = string(serviceDetails.Service.Spec.Type)
-		s.Ip = serviceDetails.Service.Spec.ClusterIP
-		s.CreatedAt = formatTime(serviceDetails.Service.CreationTimestamp.Time)
-		s.ResourceVersion = serviceDetails.Service.ResourceVersion
-		(&s.Ports).Parse(serviceDetails.Service.Spec.Ports)
+func (ss *Services) Parse(services []v1.Service) {
+	if ss == nil {
+		return
 	}
 
-	(&s.Endpoints).Parse(serviceDetails.Endpoints)
-	(&s.Pods).Parse(serviceDetails.Pods)
-	(&s.Deployments).Parse(serviceDetails.Deployments)
-	(&s.Deployments).AddAutoscalers(serviceDetails.Autoscalers)
+	for _, item := range services {
+		service := &Service{}
+		service.Parse(&item)
+		*ss = append(*ss, service)
+	}
 }
 
-func (s *Service) setIstioDetails(istioDetails *kubernetes.IstioDetails) {
-	(&s.VirtualServices).Parse(istioDetails.VirtualServices)
-	(&s.DestinationRules).Parse(istioDetails.DestinationRules)
+func (s *Service) Parse(service *v1.Service) {
+	if service != nil {
+		s.Name = service.Name
+		s.Namespace = Namespace{Name: service.Namespace}
+		s.Labels = service.Labels
+		s.Type = string(service.Spec.Type)
+		s.Ip = service.Spec.ClusterIP
+		s.CreatedAt = formatTime(service.CreationTimestamp.Time)
+		s.ResourceVersion = service.ResourceVersion
+		(&s.Ports).Parse(service.Spec.Ports)
+	}
 }
 
-func (s *Service) setPrometheusDetails(prometheusDetails map[string][]string) {
-	s.Dependencies = prometheusDetails
+func (s *ServiceDetails) SetService(svc *v1.Service) {
+	s.Service.Parse(svc)
+}
+
+func (s *ServiceDetails) SetEndpoints(eps *v1.Endpoints) {
+	(&s.Endpoints).Parse(eps)
+}
+
+func (s *ServiceDetails) SetPods(pods []v1.Pod) {
+	mPods := Pods{}
+	mPods.Parse(pods)
+	s.IstioSidecar = mPods.HasIstioSideCar()
+}
+
+func (s *ServiceDetails) SetVirtualServices(vs []kubernetes.IstioObject) {
+	(&s.VirtualServices).Parse(vs)
+}
+
+func (s *ServiceDetails) SetDestinationRules(dr []kubernetes.IstioObject) {
+	(&s.DestinationRules).Parse(dr)
+}
+
+func (s *ServiceDetails) SetSourceWorkloads(sw map[string][]prometheus.Workload) {
+	// Transform dependencies for UI
+	s.Dependencies = make(map[string][]SourceWorkload)
+	for version, workloads := range sw {
+		for _, workload := range workloads {
+			s.Dependencies[version] = append(s.Dependencies[version], SourceWorkload{
+				Name:      workload.Workload,
+				Namespace: workload.Namespace,
+			})
+		}
+	}
 }

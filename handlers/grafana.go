@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 
 	"k8s.io/api/core/v1"
@@ -14,11 +16,12 @@ import (
 
 type osRouteSupplier func(string, string) (string, error)
 type serviceSupplier func(string, string) (*v1.ServiceSpec, error)
+type dashboardSupplier func(string, string) (string, error)
 
 // GetGrafanaInfo provides the Grafana URL and other info, first by checking if a config exists
 // then (if not) by inspecting the Kubernetes Grafana service in namespace istio-system
 func GetGrafanaInfo(w http.ResponseWriter, r *http.Request) {
-	info, code, err := getGrafanaInfo(getOpenshiftRouteURL, getService)
+	info, code, err := getGrafanaInfo(getService, findDashboardPath)
 	if err != nil {
 		log.Error(err)
 		RespondWithError(w, code, err.Error())
@@ -28,51 +31,81 @@ func GetGrafanaInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // getGrafanaInfo returns the Grafana URL and other info, the HTTP status code (int) and eventually an error
-func getGrafanaInfo(osRouteSupplier osRouteSupplier, serviceSupplier serviceSupplier) (*models.GrafanaInfo, int, error) {
-	suffix := config.Get().ExternalServices.Istio.IstioIdentityDomain
+func getGrafanaInfo(serviceSupplier serviceSupplier, dashboardSupplier dashboardSupplier) (*models.GrafanaInfo, int, error) {
 	grafanaConfig := config.Get().ExternalServices.Grafana
+
+	// Check if URL is in the configuration
+	if grafanaConfig.URL == "" {
+		return nil, http.StatusNotFound, errors.New("You need to set the Grafana URL configuration.")
+	}
+
+	// Check if URL is valid
+	_, error := validateURL(grafanaConfig.URL)
+	if error != nil {
+		return nil, http.StatusNotAcceptable, errors.New("You need to set a correct format for Grafana URL in the configuration error: " + error.Error())
+	}
+
 	if !grafanaConfig.DisplayLink {
 		return nil, http.StatusNoContent, nil
 	}
-	grafanaInfo := models.GrafanaInfo{
-		URL:              grafanaConfig.URL,
-		VariablesSuffix:  suffix,
-		Dashboard:        grafanaConfig.Dashboard,
-		VarServiceSource: grafanaConfig.VarServiceSource,
-		VarServiceDest:   grafanaConfig.VarServiceDest}
-	if grafanaInfo.URL != "" {
-		return &grafanaInfo, http.StatusOK, nil
-	}
 
-	url, err := osRouteSupplier(grafanaConfig.ServiceNamespace, grafanaConfig.Service)
-	if err == nil {
-		grafanaInfo.URL = url
-		return &grafanaInfo, http.StatusOK, nil
-	}
-	// Else on error, silently continue. Might not be running on OpenShift.
-
+	// Find the in-cluster URL to reach Grafana's REST API
 	spec, err := serviceSupplier(grafanaConfig.ServiceNamespace, grafanaConfig.Service)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-
-	if len(spec.ExternalIPs) == 0 {
-		return nil, http.StatusNotFound, errors.New("Unable to find Grafana URL: no route defined. ExternalIPs not defined on service 'grafana'")
+	if len(spec.Ports) == 0 {
+		return nil, http.StatusInternalServerError, errors.New("No port found for Grafana service, cannot access in-cluster service")
 	}
-	var port int32
-	port = 80
-
-	if len(spec.ExternalIPs) > 1 {
-		log.Warning("Several IPs found for service 'grafana', only the first will be used")
+	if len(spec.Ports) > 1 {
+		log.Warning("Several ports found for Grafana service, picking the first one")
 	}
-	if len(spec.Ports) > 0 {
-		port = spec.Ports[0].Port
-		if len(spec.Ports) > 1 {
-			log.Warning("Several ports found for service 'grafana', only the first will be used")
-		}
+	internalURL := fmt.Sprintf("http://%s.%s:%d", grafanaConfig.Service, grafanaConfig.ServiceNamespace, spec.Ports[0].Port)
+
+	// Call Grafana REST API to get dashboard urls
+	serviceDashboardPath, err := dashboardSupplier(internalURL, grafanaConfig.ServiceDashboardPattern)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	workloadDashboardPath, err := dashboardSupplier(internalURL, grafanaConfig.WorkloadDashboardPattern)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
 	}
 
-	// detect https?
-	grafanaInfo.URL = fmt.Sprintf("http://%s:%d", spec.ExternalIPs[0], port)
+	grafanaInfo := models.GrafanaInfo{
+		URL:                   grafanaConfig.URL,
+		ServiceDashboardPath:  serviceDashboardPath,
+		WorkloadDashboardPath: workloadDashboardPath,
+		VarNamespace:          grafanaConfig.VarNamespace,
+		VarService:            grafanaConfig.VarService,
+		VarWorkload:           grafanaConfig.VarWorkload,
+	}
+
 	return &grafanaInfo, http.StatusOK, nil
+}
+
+func findDashboardPath(url, searchPattern string) (string, error) {
+	resp, err := http.Get(url + "/api/search?query=" + searchPattern)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	var f interface{}
+	err = json.Unmarshal(body, &f)
+	if err != nil {
+		return "", err
+	}
+	dashboards := f.([]interface{})
+	if len(dashboards) == 0 {
+		return "", fmt.Errorf("No Grafana dashboard found for pattern '%s'", searchPattern)
+	}
+	if len(dashboards) > 1 {
+		log.Infof("Several Grafana dashboards found for pattern '%s', picking the first one", searchPattern)
+	}
+	dashPath := dashboards[0].(map[string]interface{})["url"]
+	return dashPath.(string), nil
 }

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 
 	"k8s.io/api/core/v1"
+
+	"github.com/kiali/kiali/config"
 )
 
 // Pods alias for list of Pod structs
@@ -65,7 +67,7 @@ func (pod *Pod) Parse(p *v1.Pod) {
 		})
 	}
 	// Parse some annotations
-	if jSon, ok := p.Annotations["sidecar.istio.io/status"]; ok {
+	if jSon, ok := p.Annotations[config.Get().ExternalServices.Istio.IstioSidecarAnnotation]; ok {
 		var scs sideCarStatus
 		err := json.Unmarshal([]byte(jSon), &scs)
 		if err == nil {
@@ -92,4 +94,17 @@ func lookupImage(containerName string, containers []v1.Container) string {
 		}
 	}
 	return ""
+}
+
+func (pods Pods) HasIstioSideCar() bool {
+	for _, pod := range pods {
+		if pod.HasIstioSideCar() {
+			return true
+		}
+	}
+	return false
+}
+
+func (pod Pod) HasIstioSideCar() bool {
+	return len(pod.IstioContainers) > 0
 }

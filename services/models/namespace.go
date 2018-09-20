@@ -3,20 +3,8 @@ package models
 import (
 	"k8s.io/api/core/v1"
 
-	"github.com/kiali/kiali/kubernetes"
+	osv1 "github.com/openshift/api/project/v1"
 )
-
-// A Namespace provide a scope for names.
-// This type used to describe a set of objects.
-//
-// swagger:parameters istioConfigList
-type NamespaceParam struct {
-	// The id of the namespace.
-	//
-	// in: path
-	// required: true
-	Name string `json:"namespace"`
-}
 
 // A Namespace provide a scope for names
 // This type is used to describe a set of objects.
@@ -30,23 +18,9 @@ type Namespace struct {
 	Name string `json:"name"`
 }
 
-func GetNamespaces() ([]Namespace, error) {
-	istioClient, err := kubernetes.NewClient()
-	if err != nil {
-		return nil, err
-	}
-
-	services, err := istioClient.GetNamespaces()
-	if err != nil {
-		return nil, err
-	}
-
-	return CastNamespaceCollection(services), nil
-}
-
-func CastNamespaceCollection(nsl *v1.NamespaceList) []Namespace {
-	namespaces := make([]Namespace, len(nsl.Items))
-	for i, item := range nsl.Items {
+func CastNamespaceCollection(ns []v1.Namespace) []Namespace {
+	namespaces := make([]Namespace, len(ns))
+	for i, item := range ns {
 		namespaces[i] = CastNamespace(item)
 	}
 
@@ -56,6 +30,22 @@ func CastNamespaceCollection(nsl *v1.NamespaceList) []Namespace {
 func CastNamespace(ns v1.Namespace) Namespace {
 	namespace := Namespace{}
 	namespace.Name = ns.Name
+
+	return namespace
+}
+
+func CastProjectCollection(pl *osv1.ProjectList) []Namespace {
+	namespaces := make([]Namespace, len(pl.Items))
+	for i, item := range pl.Items {
+		namespaces[i] = CastProject(item)
+	}
+
+	return namespaces
+}
+
+func CastProject(p osv1.Project) Namespace {
+	namespace := Namespace{}
+	namespace.Name = p.Name
 
 	return namespace
 }

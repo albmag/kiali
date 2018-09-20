@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"gopkg.in/yaml.v2"
+	yaml "gopkg.in/yaml.v2"
 
 	"github.com/kiali/kiali/config/security"
 	"github.com/kiali/kiali/log"
@@ -29,30 +29,34 @@ const (
 	EnvServerPort                       = "SERVER_PORT"
 	EnvServerCredentialsUsername        = "SERVER_CREDENTIALS_USERNAME"
 	EnvServerCredentialsPassword        = "SERVER_CREDENTIALS_PASSWORD"
+	EnvWebRoot                          = "SERVER_WEB_ROOT"
 	EnvServerStaticContentRootDirectory = "SERVER_STATIC_CONTENT_ROOT_DIRECTORY"
 	EnvServerCORSAllowAll               = "SERVER_CORS_ALLOW_ALL"
 
-	EnvGrafanaDisplayLink      = "GRAFANA_DISPLAY_LINK"
-	EnvGrafanaURL              = "GRAFANA_URL"
-	EnvGrafanaServiceNamespace = "GRAFANA_SERVICE_NAMESPACE"
-	EnvGrafanaService          = "GRAFANA_SERVICE"
-	EnvGrafanaDashboard        = "GRAFANA_DASHBOARD"
-	EnvGrafanaVarServiceSource = "GRAFANA_VAR_SERVICE_SOURCE"
-	EnvGrafanaVarServiceDest   = "GRAFANA_VAR_SERVICE_DEST"
+	EnvGrafanaDisplayLink              = "GRAFANA_DISPLAY_LINK"
+	EnvGrafanaURL                      = "GRAFANA_URL"
+	EnvGrafanaServiceNamespace         = "GRAFANA_SERVICE_NAMESPACE"
+	EnvGrafanaService                  = "GRAFANA_SERVICE"
+	EnvGrafanaWorkloadDashboardPattern = "GRAFANA_WORKLOAD_DASHBOARD_PATTERN"
+	EnvGrafanaServiceDashboardPattern  = "GRAFANA_SERVICE_DASHBOARD_PATTERN"
+	EnvGrafanaVarNamespace             = "GRAFANA_VAR_NAMESPACE"
+	EnvGrafanaVarService               = "GRAFANA_VAR_SERVICE"
+	EnvGrafanaVarWorkload              = "GRAFANA_VAR_WORKLOAD"
 
-	EnvJaegerURL              = "JAEGER_URL"
-	EnvJaegerServiceNamespace = "JAEGER_SERVICE_NAMESPACE"
-	EnvJaegerService          = "JAEGER_SERVICE"
+	EnvJaegerURL = "JAEGER_URL"
 
-	EnvServiceFilterLabelName = "SERVICE_FILTER_LABEL_NAME"
-	EnvVersionFilterLabelName = "VERSION_FILTER_LABEL_NAME"
+	EnvLoginTokenSigningKey        = "LOGIN_TOKEN_SIGNING_KEY"
+	EnvLoginTokenExpirationSeconds = "LOGIN_TOKEN_EXPIRATION_SECONDS"
+	EnvIstioNamespace              = "ISTIO_NAMESPACE"
 
-	EnvTokenSecret       = "TOKEN_SECRET"
-	EnvTokenExpirationAt = "TOKEN_EXPIRATION_AT"
-	EnvIstioNamespace    = "ISTIO_NAMESPACE"
+	EnvIstioLabelNameApp     = "ISTIO_LABEL_NAME_APP"
+	EnvIstioLabelNameVersion = "ISTIO_LABEL_NAME_VERSION"
+)
 
-	EnvKialiService       = "KIALI_SERVICE"
-	IstioVersionSupported = ">= 0.8"
+// The versions that Kiali requires
+const (
+	IstioVersionSupported   = ">= 1.0"
+	MaistraVersionSupported = ">= 0.1.0"
 )
 
 // Global configuration for the application.
@@ -63,26 +67,27 @@ type Server struct {
 	Address                    string               `yaml:",omitempty"`
 	Port                       int                  `yaml:",omitempty"`
 	Credentials                security.Credentials `yaml:",omitempty"`
+	WebRoot                    string               `yaml:"web_root,omitempty"`
 	StaticContentRootDirectory string               `yaml:"static_content_root_directory,omitempty"`
 	CORSAllowAll               bool                 `yaml:"cors_allow_all,omitempty"`
 }
 
 // GrafanaConfig describes configuration used for Grafana links
 type GrafanaConfig struct {
-	DisplayLink      bool   `yaml:"display_link"`
-	URL              string `yaml:"url"`
-	ServiceNamespace string `yaml:"service_namespace"`
-	Service          string `yaml:"service"`
-	Dashboard        string `yaml:"dashboard"`
-	VarServiceSource string `yaml:"var_service_source"`
-	VarServiceDest   string `yaml:"var_service_dest"`
+	DisplayLink              bool   `yaml:"display_link"`
+	URL                      string `yaml:"url"`
+	ServiceNamespace         string `yaml:"service_namespace"`
+	Service                  string `yaml:"service"`
+	WorkloadDashboardPattern string `yaml:"workload_dashboard_pattern"`
+	ServiceDashboardPattern  string `yaml:"service_dashboard_pattern"`
+	VarNamespace             string `yaml:"var_namespace"`
+	VarService               string `yaml:"var_service"`
+	VarWorkload              string `yaml:"var_workload"`
 }
 
 // JaegerConfig describes configuration used for jaeger links
 type JaegerConfig struct {
-	URL              string `yaml:"url"`
-	ServiceNamespace string `yaml:"service_namespace"`
-	Service          string `yaml:"service"`
+	URL string `yaml:"url"`
 }
 
 // IstioConfig describes configuration used for istio links
@@ -92,6 +97,7 @@ type IstioConfig struct {
 	IstioSidecarAnnotation string `yaml:"istio_sidecar_annotation,omitempty"`
 }
 
+// ExternalServices holds configurations for other systems that Kiali depends on
 type ExternalServices struct {
 	Istio                IstioConfig   `yaml:"istio,omitempty"`
 	PrometheusServiceURL string        `yaml:"prometheus_service_url,omitempty"`
@@ -99,22 +105,27 @@ type ExternalServices struct {
 	Jaeger               JaegerConfig  `yaml:"jaeger,omitempty"`
 }
 
-type Token struct {
-	Secret       []byte `yaml:"secret,omitempty"`
-	ExpirationAt int64  `yaml:"expiration,omitempty"`
+// LoginToken holds config used in token-based authentication
+type LoginToken struct {
+	SigningKey        []byte `yaml:"signing_key,omitempty"`
+	ExpirationSeconds int64  `yaml:"expiration_seconds,omitempty"`
+}
+
+// IstioLabels holds configuration about the labels required by Istio
+type IstioLabels struct {
+	AppLabelName     string `yaml:"app_label_name,omitempty"`
+	VersionLabelName string `yaml:"version_label_name,omitempty"`
 }
 
 // Config defines full YAML configuration.
 type Config struct {
-	Identity               security.Identity `yaml:",omitempty"`
-	Server                 Server            `yaml:",omitempty"`
-	InCluster              bool              `yaml:"in_cluster,omitempty"`
-	ServiceFilterLabelName string            `yaml:"service_filter_label_name,omitempty"`
-	VersionFilterLabelName string            `yaml:"version_filter_label_name,omitempty"`
-	ExternalServices       ExternalServices  `yaml:"external_services,omitempty"`
-	Token                  Token             `yaml:"token,omitempty"`
-	KialiService           string            `yaml:"kiali_service,omitempty"`
-	IstioNamespace         string            `yaml:"istio_namespace,omitempty"`
+	Identity         security.Identity `yaml:",omitempty"`
+	Server           Server            `yaml:",omitempty"`
+	InCluster        bool              `yaml:"in_cluster,omitempty"`
+	ExternalServices ExternalServices  `yaml:"external_services,omitempty"`
+	LoginToken       LoginToken        `yaml:"login_token,omitempty"`
+	IstioNamespace   string            `yaml:"istio_namespace,omitempty"`
+	IstioLabels      IstioLabels       `yaml:"istio_labels,omitempty"`
 }
 
 // NewConfig creates a default Config struct
@@ -124,10 +135,9 @@ func NewConfig() (c *Config) {
 	c.Identity.CertFile = getDefaultString(EnvIdentityCertFile, "")
 	c.Identity.PrivateKeyFile = getDefaultString(EnvIdentityPrivateKeyFile, "")
 	c.InCluster = getDefaultBool(EnvInCluster, true)
-	c.ServiceFilterLabelName = strings.TrimSpace(getDefaultString(EnvServiceFilterLabelName, "app"))
-	c.VersionFilterLabelName = strings.TrimSpace(getDefaultString(EnvVersionFilterLabelName, "version"))
-	c.KialiService = strings.TrimSpace(getDefaultString(EnvKialiService, "kiali"))
 	c.IstioNamespace = strings.TrimSpace(getDefaultString(EnvIstioNamespace, "istio-system"))
+	c.IstioLabels.AppLabelName = strings.TrimSpace(getDefaultString(EnvIstioLabelNameApp, "app"))
+	c.IstioLabels.VersionLabelName = strings.TrimSpace(getDefaultString(EnvIstioLabelNameVersion, "version"))
 
 	// Server configuration
 	c.Server.Address = strings.TrimSpace(getDefaultString(EnvServerAddress, ""))
@@ -136,6 +146,7 @@ func NewConfig() (c *Config) {
 		Username: getDefaultString(EnvServerCredentialsUsername, ""),
 		Password: getDefaultString(EnvServerCredentialsPassword, ""),
 	}
+	c.Server.WebRoot = strings.TrimSpace(getDefaultString(EnvWebRoot, "/"))
 	c.Server.StaticContentRootDirectory = strings.TrimSpace(getDefaultString(EnvServerStaticContentRootDirectory, "/static-files"))
 	c.Server.CORSAllowAll = getDefaultBool(EnvServerCORSAllowAll, false)
 
@@ -147,23 +158,23 @@ func NewConfig() (c *Config) {
 	c.ExternalServices.Grafana.URL = strings.TrimSpace(getDefaultString(EnvGrafanaURL, ""))
 	c.ExternalServices.Grafana.ServiceNamespace = strings.TrimSpace(getDefaultString(EnvGrafanaServiceNamespace, "istio-system"))
 	c.ExternalServices.Grafana.Service = strings.TrimSpace(getDefaultString(EnvGrafanaService, "grafana"))
-	c.ExternalServices.Grafana.Dashboard = strings.TrimSpace(getDefaultString(EnvGrafanaDashboard, "istio-dashboard"))
-	c.ExternalServices.Grafana.VarServiceSource = strings.TrimSpace(getDefaultString(EnvGrafanaVarServiceSource, "var-source"))
-	c.ExternalServices.Grafana.VarServiceDest = strings.TrimSpace(getDefaultString(EnvGrafanaVarServiceDest, "var-http_destination"))
+	c.ExternalServices.Grafana.WorkloadDashboardPattern = strings.TrimSpace(getDefaultString(EnvGrafanaWorkloadDashboardPattern, "Istio%20Workload%20Dashboard"))
+	c.ExternalServices.Grafana.ServiceDashboardPattern = strings.TrimSpace(getDefaultString(EnvGrafanaServiceDashboardPattern, "Istio%20Service%20Dashboard"))
+	c.ExternalServices.Grafana.VarNamespace = strings.TrimSpace(getDefaultString(EnvGrafanaVarNamespace, "var-namespace"))
+	c.ExternalServices.Grafana.VarService = strings.TrimSpace(getDefaultString(EnvGrafanaVarService, "var-service"))
+	c.ExternalServices.Grafana.VarWorkload = strings.TrimSpace(getDefaultString(EnvGrafanaVarWorkload, "var-workload"))
 
 	// Jaeger Configuration
 	c.ExternalServices.Jaeger.URL = strings.TrimSpace(getDefaultString(EnvJaegerURL, ""))
-	c.ExternalServices.Jaeger.ServiceNamespace = strings.TrimSpace(getDefaultString(EnvJaegerServiceNamespace, "istio-system"))
-	c.ExternalServices.Jaeger.Service = strings.TrimSpace(getDefaultString(EnvJaegerService, "jaeger-query"))
 
 	// Istio Configuration
 	c.ExternalServices.Istio.IstioIdentityDomain = strings.TrimSpace(getDefaultString(EnvIstioIdentityDomain, "svc.cluster.local"))
 	c.ExternalServices.Istio.IstioSidecarAnnotation = strings.TrimSpace(getDefaultString(EnvIstioSidecarAnnotation, "sidecar.istio.io/status"))
 	c.ExternalServices.Istio.UrlServiceVersion = strings.TrimSpace(getDefaultString(EnvIstioUrlServiceVersion, "http://istio-pilot:9093/version"))
 
-	// Token Configuration
-	c.Token.Secret = []byte(strings.TrimSpace(getDefaultString(EnvTokenSecret, "kiali")))
-	c.Token.ExpirationAt = getDefaultInt64(EnvTokenExpirationAt, 36000)
+	// Token-based authentication Configuration
+	c.LoginToken.SigningKey = []byte(strings.TrimSpace(getDefaultString(EnvLoginTokenSigningKey, "kiali")))
+	c.LoginToken.ExpirationSeconds = getDefaultInt64(EnvLoginTokenExpirationSeconds, 24*3600)
 
 	return
 }
